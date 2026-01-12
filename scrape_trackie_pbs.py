@@ -296,6 +296,8 @@ def canonical_event_name(event: str) -> str:
     # Normalize common meter shorthand: "60m" -> "60 Meter", "4x400m" -> "4x400 Meter"
     s = re.sub(r"\\b(\\d{2,4})\\s*m\\b", r"\\1 Meter", s, flags=re.I)
     s = re.sub(r"\\b(4x\\d{2,4})\\s*m\\b", r"\\1 Meter", s, flags=re.I)
+    # Also normalize British spellings and variations
+    s = re.sub(r"\\b(\\d{2,4})\\s*(metre|metres)\\b", r"\\1 Meter", s, flags=re.I)
 
     # Title-ish normalize spacing
     s = _normalize_ws(s)
@@ -358,7 +360,16 @@ def parse_rankings_entries(rankings_html: str, base_url: str) -> list[dict]:
             tds = tr.find_all("td")
             if len(tds) < 3:
                 continue
-            perf_raw = _normalize_ws(tds[-1].get_text(" "))
+            perf_td = tds[-1]
+            perf_raw = _normalize_ws(perf_td.get_text(" "))
+            perf_title = perf_td.get("title") or perf_td.get("data-original-title") or perf_td.get("data-title")
+            if perf_title:
+                perf_title = _normalize_ws(perf_title)
+                # If tooltip exists and contains a time/performance value, prefer it
+                if perf_title and perf_title != perf_raw:
+                    # Check if tooltip looks like a performance (has numbers)
+                    if re.search(r"\d", perf_title):
+                        perf_raw = perf_title
             if not perf_raw or perf_raw.upper() in {"DNS", "DNF", "DQ", "NM", "SCR"}:
                 continue
             entries.append(
@@ -482,8 +493,25 @@ def parse_performance_rows(athlete_html: str, athlete_url: str) -> list[Performa
             tds = tr.find_all("td")
             if len(tds) < 4:
                 continue
+            # Issue #1: Skip header rows (rows where first cell looks like a header, e.g., "Event", "Performance")
+            first_cell_text = _normalize_ws(tds[0].get_text(" ")).lower()
+            if first_cell_text in ["event", "performance", "perf", "meet", "date"]:
+                continue
             event = canonical_event_name(_normalize_ws(tds[0].get_text(" ")))
-            perf_raw = _normalize_ws(tds[1].get_text(" "))
+            
+            # Issue #3: Extract raw time from tooltip if available (title attribute)
+            perf_td = tds[1]
+            perf_raw = _normalize_ws(perf_td.get_text(" "))
+            # Check for title attribute which often contains the raw unconverted time
+            perf_title = perf_td.get("title") or perf_td.get("data-original-title") or perf_td.get("data-title")
+            if perf_title:
+                perf_title = _normalize_ws(perf_title)
+                # If tooltip exists and contains a time/performance value, prefer it
+                if perf_title and perf_title != perf_raw:
+                    # Check if tooltip looks like a performance (has numbers)
+                    if re.search(r"\d", perf_title):
+                        perf_raw = perf_title
+            
             meet_td = tds[2]
             meet = _normalize_ws(meet_td.get_text(" "))
             meet_a = meet_td.find("a", href=True)
@@ -529,6 +557,13 @@ def parse_perf(perf_raw: str, event: str) -> Optional[ParsedPerf]:
         m = re.search(r"(-?\\d+(?:\\.\\d+)?)", seg)
         return float(m.group(1)) if m else None
 
+    is_field_event = _infer_better_is_from_event_name(event) == "higher" and any(
+        k in event_lower for k in [
+            "jump", "throw", "shot put", "discus", "javelin", "hammer",
+            "weight throw", "pole vault", "high jump", "long jump", "triple jump"
+        ]
+    )
+
     if "pts" in s_lower or "point" in s_lower or "athlon" in event_lower:
         val = _first_number(s_lower)
         if val is None:
@@ -541,6 +576,25 @@ def parse_perf(perf_raw: str, event: str) -> Optional[ParsedPerf]:
             return None
         return ParsedPerf(value=float(m.group(1)) / 100.0, unit="m", better_is="higher")
 
+    if is_field_event:
+        # Check for meters first
+        m = re.search(r"(-?\d+(?:\.\d+)?)\s*m\b", s_lower)
+        if m:
+            return ParsedPerf(value=float(m.group(1)), unit="m", better_is="higher")
+        # Check for centimeters
+        m = re.search(r"(-?\d+(?:\.\d+)?)\s*cm\b", s_lower)
+        if m:
+            return ParsedPerf(value=float(m.group(1)) / 100.0, unit="m", better_is="higher")
+        # If it's a field event but no unit found, check if it's just a number (assume meters)
+        m = re.search(r"(-?\d+(?:\.\d+)?)", s_lower)
+        if m:
+            # If the number is reasonable for a field event (between 0.3 and 150), assume meters
+            # Covers: PV (3-6m), HJ (1.5-2.5m), LJ (5-8m), TJ (12-18m), SP (10-20m), DT (40-60m), HT (50-80m), JT (50-80m)
+            val = float(m.group(1))
+            if 0.3 <= val <= 150:
+                return ParsedPerf(value=val, unit="m", better_is="higher")
+
+    # Check if it's a field mark format (has 'm' but not a distance like "300m" in event name)
     if "m" in s_lower and not re.search(r"\b\d+\s*m\b", s_lower) and not re.search(r"\b\d{2,4}m\b", event_lower):
         # field mark like "6.14m"
         m = re.search(r"(-?\d+(?:\.\d+)?)\s*m", s_lower)
