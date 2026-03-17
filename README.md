@@ -1,10 +1,21 @@
-## Trackie Brock PB Fetcher
+# Trackie PB Fetcher
 
-Scrapes Trackie U SPORTS pages to compute **personal bests (PBs)** for Brock University athletes over the **last N seasons** and exports them to a CSV.
+Scrapes [Trackie](https://www.trackie.com/) U SPORTS athlete pages to compute **personal bests (PBs)** for any Canadian university track & field team and exports them to CSV.
 
-- University page: `https://www.trackie.com/usports/tnf/universities/brock-university/3/`
+Includes both a **command-line interface** and a **graphical desktop application**.
 
-### Setup
+## Features
+
+- Scrapes athlete profile pages and historical rankings from Trackie
+- Computes personal bests per event across a configurable number of seasons
+- Correctly classifies track events (lower is better) and field events (higher is better)
+- Discovers past athletes from historical rankings pages
+- Concurrent scraping with polite rate-limiting
+- Filters by sex, event, and free-text search
+- Sortable results table with CSV export
+- Works with any U SPORTS university, not just Brock
+
+## Setup
 
 ```bash
 python3 -m venv .venv
@@ -12,7 +23,24 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### Run
+## GUI
+
+Launch the graphical interface:
+
+```bash
+python3 gui.py
+```
+
+The GUI provides:
+- Configurable university URL, seasons back, and concurrency
+- Real-time progress tracking during scraping
+- Searchable, sortable, filterable results table
+- One-click CSV export
+- Load previously exported CSV files
+- Double-click any row to open the athlete's Trackie profile
+- Keyboard shortcuts (Cmd/Ctrl+R to scrape, Cmd/Ctrl+E to export, Cmd/Ctrl+L to load)
+
+## Command Line
 
 Default: last 5 seasons, Brock University.
 
@@ -20,40 +48,50 @@ Default: last 5 seasons, Brock University.
 python3 scrape_trackie_pbs.py --years-back 5 --out brock_pbs.csv
 ```
 
-By default it also includes **past athletes** by discovering Brock athletes from the **historical Trackie rankings pages** within the same `--years-back` window. If you only want the current roster list:
+Current roster only (skip historical rankings discovery):
 
 ```bash
 python3 scrape_trackie_pbs.py --years-back 5 --no-include-past-athletes --out brock_pbs.csv
 ```
 
-Common knobs:
+All options:
 
 ```bash
 python3 scrape_trackie_pbs.py \
+  --university-url "https://www.trackie.com/usports/tnf/universities/brock-university/3/" \
   --years-back 5 \
   --delay-seconds 0.6 \
   --max-workers 6 \
   --out brock_pbs.csv
 ```
 
-### Output
+## Output
 
-CSV rows are **one athlete per event PB**, including:
+CSV rows are **one row per athlete per event PB**, including:
 
-- athlete name + profile URL
-- event name
-- best performance (raw + normalized numeric)
-- meet name + meet URL (when available)
-- derived date (best-effort; Trackie often omits the year, so we infer it from season)
+| Column | Description |
+|---|---|
+| `university` | University name (inferred from URL) |
+| `athlete_name` | Athlete's full name |
+| `sex` | M or F |
+| `event` | Normalized event name |
+| `pb_raw` | Raw performance string from Trackie |
+| `pb_value` | Normalized numeric value |
+| `pb_unit` | `s` (seconds), `m` (meters), or `pts` (points) |
+| `better_is` | `lower` for track events, `higher` for field/combined |
+| `pb_date` | ISO date (best-effort, inferred from season) |
+| `pb_season` | Season label (e.g. `2025/26`) |
+| `pb_meet` | Meet name |
+| `pb_meet_url` | Link to meet results on Trackie |
+| `athlete_url` | Link to athlete profile on Trackie |
 
-### Notes / Limitations
+## Notes & Limitations
 
-- “Last N years” is implemented as **last N seasons** (based on Trackie’s “Performance YYYY/YY” sections).
-- Trackie sometimes displays dates without a year (e.g., “Nov 29th”). The script infers year from the season:
-  - Aug–Dec → first year of season (e.g. 2025/26 → 2025)
-  - Jan–Jul → second year of season (e.g. 2025/26 → 2026)
-- Some historical athletes appear in Trackie’s rankings pages but have **empty/removed athlete profile pages**. For those athletes, the scraper falls back to **rankings-derived season-best marks**, which means:
-  - `pb_meet`, `pb_meet_url`, `pb_date`, and `pb_date_raw` will be blank for those rows
-  - PBs still respect `--years-back` because the rankings pages are fetched per season
+- **Seasons, not calendar years** — "last N years" means last N Trackie seasons (Aug–Jul cycles).
+- **Date inference** — Trackie often omits the year from dates. The scraper infers it from the season: Aug–Dec maps to the first year, Jan–Jul to the second.
+- **Historical athletes** — Some athletes appear in rankings but have empty profile pages. For those, the scraper uses rankings-derived season-best marks (meet/date fields will be blank).
+- **Rate limiting** — The scraper defaults to 0.6 s between requests to avoid overloading Trackie.
 
+## License
 
+MIT
