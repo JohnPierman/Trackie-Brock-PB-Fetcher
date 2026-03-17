@@ -2,10 +2,11 @@
 """
 Scrape Trackie U SPORTS athlete pages and compute PBs for the last N seasons.
 
-Note: This was made with Cursor, and wasn't refined extensively. Use at your own risk.
-
-Example:
+Usage:
   python3 scrape_trackie_pbs.py --years-back 5 --out brock_pbs.csv
+
+For the graphical interface, run:
+  python3 gui.py
 """
 
 from __future__ import annotations
@@ -118,7 +119,7 @@ SEASON_RE = re.compile(r"\b(20\d{2})/(\d{2})\b")
 
 
 def _normalize_ws(s: str) -> str:
-    return re.sub(r"\\s+", " ", (s or "").replace("\\xa0", " ")).strip()
+    return re.sub(r"\s+", " ", (s or "").replace("\xa0", " ")).strip()
 
 
 def _abs_url(base: str, maybe_relative: Optional[str]) -> Optional[str]:
@@ -179,7 +180,7 @@ def parse_university_athlete_index(university_html: str, university_url: str) ->
                 if sex_candidate in {"M", "F"}:
                     sex = sex_candidate
 
-            name = _normalize_ws(a.get_text(" "))
+            name = _clean_athlete_name(_normalize_ws(a.get_text(" ")))
             index[athlete_url] = {
                 "name": name,
                 "sex": sex,
@@ -244,6 +245,7 @@ def parse_rankings_athlete_index(rankings_html: str, base_url: str) -> dict[str,
                 continue
             athlete_url = _abs_url(base_url, href) or href
             name = _normalize_ws(el.get_text(" "))
+            name = _clean_athlete_name(name)
             prev = index.get(athlete_url, {})
             index[athlete_url] = {
                 "name": prev.get("name") or name,
@@ -293,9 +295,8 @@ def canonical_event_name(event: str) -> str:
     # Strip common suffix annotations
     s = re.sub(r"\s*\(non ranking\)\s*$", "", s, flags=re.I).strip()
 
-    # Normalize common meter shorthand: "60m" -> "60 Meter", "4x400m" -> "4x400 Meter"
-    s = re.sub(r"\\b(\\d{2,4})\\s*m\\b", r"\\1 Meter", s, flags=re.I)
-    s = re.sub(r"\\b(4x\\d{2,4})\\s*m\\b", r"\\1 Meter", s, flags=re.I)
+    s = re.sub(r"\b(\d{2,4})\s*m\b", r"\1 Meter", s, flags=re.I)
+    s = re.sub(r"\b(4x\d{2,4})\s*m\b", r"\1 Meter", s, flags=re.I)
 
     # Title-ish normalize spacing
     s = _normalize_ws(s)
@@ -354,7 +355,7 @@ def parse_rankings_entries(rankings_html: str, base_url: str) -> list[dict]:
             if not ATHLETE_HREF_RE.match(href):
                 continue
             athlete_url = _abs_url(base_url, href) or href
-            athlete_name = _normalize_ws(a.get_text(" "))
+            athlete_name = _clean_athlete_name(_normalize_ws(a.get_text(" ")))
             tds = tr.find_all("td")
             if len(tds) < 3:
                 continue
@@ -434,11 +435,18 @@ def infer_date_from_season(season: str, date_raw: str) -> Optional[dt.date]:
         return None
 
 
+def _clean_athlete_name(name: str) -> str:
+    """Strip trailing ' - University Name' suffix from athlete names."""
+    return re.sub(r"\s*-\s+\S+(\s+\S+)*\s*University\s*$", "", name, flags=re.I).strip()
+
+
 def parse_athlete_name(soup: BeautifulSoup) -> Optional[str]:
     h1 = soup.find(["h1", "h2"])
     if not h1:
         return None
     name = _normalize_ws(h1.get_text(" "))
+    if name:
+        name = _clean_athlete_name(name)
     return name or None
 
 
@@ -513,10 +521,8 @@ def parse_performance_rows(athlete_html: str, athlete_url: str) -> list[Performa
 
 def parse_perf(perf_raw: str, event: str) -> Optional[ParsedPerf]:
     s = _normalize_ws(perf_raw)
-    # drop wind / notes in parentheses e.g. "10.65 (+1.2)"
-    s = re.sub(r"\\s*\\([^)]*\\)\\s*", " ", s).strip()
-    # drop common footnote markers like "*1", "^5" etc
-    s = re.sub(r"[*^]\\s*\\d+\\b", "", s).strip()
+    s = re.sub(r"\s*\([^)]*\)\s*", " ", s).strip()
+    s = re.sub(r"[*^]\s*\d+\b", "", s).strip()
     s = s.replace("*", "").replace("^", "").strip()
 
     if not s or any(tok in s.upper() for tok in ["DNS", "DNF", "DQ", "NM", "SCR"]):
@@ -526,7 +532,7 @@ def parse_perf(perf_raw: str, event: str) -> Optional[ParsedPerf]:
     event_lower = event.lower()
 
     def _first_number(seg: str) -> Optional[float]:
-        m = re.search(r"(-?\\d+(?:\\.\\d+)?)", seg)
+        m = re.search(r"(-?\d+(?:\.\d+)?)", seg)
         return float(m.group(1)) if m else None
 
     if "pts" in s_lower or "point" in s_lower or "athlon" in event_lower:
@@ -541,11 +547,11 @@ def parse_perf(perf_raw: str, event: str) -> Optional[ParsedPerf]:
             return None
         return ParsedPerf(value=float(m.group(1)) / 100.0, unit="m", better_is="higher")
 
-    if "m" in s_lower and not re.search(r"\b\d+\s*m\b", s_lower) and not re.search(r"\b\d{2,4}m\b", event_lower):
-        # field mark like "6.14m"
-        m = re.search(r"(-?\d+(?:\.\d+)?)\s*m", s_lower)
-        if m:
-            return ParsedPerf(value=float(m.group(1)), unit="m", better_is="higher")
+    m_mark = re.search(r"(-?\d+(?:\.\d+)?)\s*m\b", s_lower)
+    if m_mark and _infer_better_is_from_event_name(event) == "higher":
+        return ParsedPerf(value=float(m_mark.group(1)), unit="m", better_is="higher")
+    if m_mark and "m" in s_lower and not re.search(r"\b\d{2,4}\s*m(eter)?\b", event_lower):
+        return ParsedPerf(value=float(m_mark.group(1)), unit="m", better_is="higher")
 
     if ":" in s_lower:
         # time like "1:52.34" or "12:34"
@@ -564,11 +570,12 @@ def parse_perf(perf_raw: str, event: str) -> Optional[ParsedPerf]:
                 return None
             return ParsedPerf(value=int(hours) * 3600 + int(minutes) * 60 + float(seconds), unit="s", better_is="lower")
 
-    # default numeric: assume time (seconds) for track & XC
     m = re.search(r"(-?\d+(?:\.\d+)?)", s_lower)
     if not m:
         return None
-    return ParsedPerf(value=float(m.group(1)), unit="s", better_is="lower")
+    direction = _infer_better_is_from_event_name(event)
+    unit = "m" if direction == "higher" else "s"
+    return ParsedPerf(value=float(m.group(1)), unit=unit, better_is=direction)
 
 
 def within_last_n_seasons(season: str, years_back: int, now: Optional[dt.date] = None) -> bool:
@@ -586,6 +593,7 @@ def compute_pbs(
     athlete_name: str,
     athlete_sex: Optional[str],
     rows: Iterable[PerformanceRow],
+    university_name: str = "Brock University",
 ) -> list[dict]:
     best_by_event: dict[str, tuple[PerformanceRow, ParsedPerf]] = {}
     for r in rows:
@@ -613,7 +621,7 @@ def compute_pbs(
     for event, (r, p) in sorted(best_by_event.items(), key=lambda kv: kv[0].lower()):
         out.append(
             {
-                "university": "Brock University",
+                "university": university_name,
                 "athlete_name": athlete_name,
                 "sex": athlete_sex or "",
                 "event": event,
@@ -637,6 +645,7 @@ def compute_pbs_from_rankings_entries(
     athlete_name: str,
     athlete_sex: Optional[str],
     entries: Iterable[dict],
+    university_name: str = "Brock University",
 ) -> list[dict]:
     """
     Compute PBs per event from rankings entries (no meet/date available).
@@ -653,7 +662,7 @@ def compute_pbs_from_rankings_entries(
         if not parsed:
             # rankings sometimes omit units; infer direction based on event name
             direction = _infer_better_is_from_event_name(event)
-            m = re.search(r"(-?\\d+(?:\\.\\d+)?)", perf_raw)
+            m = re.search(r"(-?\d+(?:\.\d+)?)", perf_raw)
             if not m:
                 continue
             val = float(m.group(1))
@@ -675,7 +684,7 @@ def compute_pbs_from_rankings_entries(
     for event, (perf_raw, p) in sorted(best_by_event.items(), key=lambda kv: kv[0].lower()):
         out.append(
             {
-                "university": "Brock University",
+                "university": university_name,
                 "athlete_name": athlete_name,
                 "sex": athlete_sex or "",
                 "event": event,
@@ -699,6 +708,7 @@ def scrape_one_athlete(
     athlete_url: str,
     years_back: int,
     sex_override: Optional[str] = None,
+    university_name: str = "Brock University",
 ) -> list[dict]:
     html = client.get_html(athlete_url)
     soup = BeautifulSoup(html, "lxml")
@@ -706,7 +716,13 @@ def scrape_one_athlete(
     sex = sex_override or parse_athlete_sex(soup)
     rows = parse_performance_rows(html, athlete_url)
     rows = [r for r in rows if within_last_n_seasons(r.season, years_back)]
-    return compute_pbs(athlete_url=athlete_url, athlete_name=name, athlete_sex=sex, rows=rows)
+    return compute_pbs(
+        athlete_url=athlete_url,
+        athlete_name=name,
+        athlete_sex=sex,
+        rows=rows,
+        university_name=university_name,
+    )
 
 
 def _validate_url(url: str) -> str:
@@ -717,12 +733,163 @@ def _validate_url(url: str) -> str:
 
 
 def _infer_university_id(university_url: str) -> Optional[int]:
-    # e.g. https://www.trackie.com/usports/tnf/universities/brock-university/3/
     parts = [p for p in urlparse(university_url).path.split("/") if p]
     for part in reversed(parts):
         if part.isdigit():
             return int(part)
     return None
+
+
+def _infer_university_name(university_url: str) -> str:
+    """Extract a readable university name from the URL slug."""
+    parts = [p for p in urlparse(university_url).path.split("/") if p]
+    for i, part in enumerate(parts):
+        if part == "universities" and i + 1 < len(parts):
+            slug = parts[i + 1]
+            return slug.replace("-", " ").title()
+    return "University"
+
+
+CSV_FIELDNAMES = [
+    "university",
+    "athlete_name",
+    "sex",
+    "event",
+    "pb_raw",
+    "pb_value",
+    "pb_unit",
+    "better_is",
+    "pb_date",
+    "pb_date_raw",
+    "pb_season",
+    "pb_meet",
+    "pb_meet_url",
+    "athlete_url",
+]
+
+
+def run_scrape(
+    university_url: str = DEFAULT_UNIVERSITY_URL,
+    years_back: int = 5,
+    include_past_athletes: bool = True,
+    university_id: int = 0,
+    delay_seconds: float = 0.6,
+    max_workers: int = 6,
+    timeout_seconds: float = 30.0,
+    retries: int = 3,
+    max_athletes: int = 0,
+    on_progress: Optional[callable] = None,
+    on_status: Optional[callable] = None,
+) -> list[dict]:
+    """
+    Core scraping logic. Returns a list of PB dicts.
+
+    on_progress(completed, total): called after each athlete is processed.
+    on_status(message): called with status messages.
+    """
+    def _status(msg: str) -> None:
+        if on_status:
+            on_status(msg)
+        else:
+            print(msg)
+
+    client = TrackieClient(
+        delay_seconds=delay_seconds,
+        timeout_seconds=timeout_seconds,
+        retries=retries,
+    )
+
+    _status("Fetching university roster...")
+    uni_html = client.get_html(university_url)
+    athlete_index = parse_university_athlete_index(uni_html, university_url)
+    university_name = _infer_university_name(university_url)
+
+    uni_id = university_id if university_id > 0 else (_infer_university_id(university_url) or 0)
+    rankings_entries_by_athlete: dict[str, list[dict]] = {}
+
+    if include_past_athletes:
+        if not uni_id:
+            _status("[warn] Could not infer university id; skipping past athlete discovery.")
+        else:
+            for end_year in _season_end_years(years_back):
+                rankings_url = f"https://www.trackie.com/usports/tnf/rankings/universities/{uni_id}/{end_year}/"
+                _status(f"Fetching rankings for {end_year - 1}/{str(end_year)[-2:]}...")
+                try:
+                    rhtml = client.get_html(rankings_url)
+                    for ent in parse_rankings_entries(rhtml, rankings_url):
+                        rankings_entries_by_athlete.setdefault(ent["athlete_url"], []).append(ent)
+                    r_index = parse_rankings_athlete_index(rhtml, rankings_url)
+                    for url, meta in r_index.items():
+                        if url not in athlete_index:
+                            athlete_index[url] = meta
+                        else:
+                            if not athlete_index[url].get("sex") and meta.get("sex"):
+                                athlete_index[url]["sex"] = meta["sex"]
+                            if not athlete_index[url].get("name") and meta.get("name"):
+                                athlete_index[url]["name"] = meta["name"]
+                except Exception as e:
+                    _status(f"[warn] Failed rankings discovery for {rankings_url}: {e}")
+
+    athlete_urls = sorted(athlete_index.keys())
+    if max_athletes and max_athletes > 0:
+        athlete_urls = athlete_urls[:max_athletes]
+
+    if not athlete_urls:
+        raise RuntimeError("No athlete URLs found on the university page. Trackie page structure may have changed.")
+
+    _status(f"Scraping {len(athlete_urls)} athletes...")
+    all_rows: list[dict] = []
+    completed = 0
+
+    with ThreadPoolExecutor(max_workers=max(1, max_workers)) as ex:
+        futures = {
+            ex.submit(
+                scrape_one_athlete,
+                client,
+                url,
+                years_back,
+                athlete_index.get(url, {}).get("sex") or None,
+                university_name,
+            ): url
+            for url in athlete_urls
+        }
+        pbar = tqdm(total=len(futures), desc="Athletes", unit="athlete") if (tqdm is not None and on_progress is None) else None
+        try:
+            for fut in as_completed(futures):
+                url = futures[fut]
+                try:
+                    rows = fut.result()
+                    if not rows:
+                        fallback_entries = rankings_entries_by_athlete.get(url, [])
+                        if fallback_entries:
+                            meta = athlete_index.get(url, {})
+                            name = meta.get("name") or url
+                            sex = meta.get("sex") or ""
+                            rows = compute_pbs_from_rankings_entries(
+                                url, name, sex, fallback_entries, university_name
+                            )
+                    all_rows.extend(rows)
+                except Exception as e:
+                    _status(f"[warn] Failed athlete {url}: {e}")
+                completed += 1
+                if on_progress:
+                    on_progress(completed, len(futures))
+                if pbar is not None:
+                    pbar.update(1)
+        finally:
+            if pbar is not None:
+                pbar.close()
+
+    _status(f"Done. {len(all_rows)} PB records from {len(athlete_urls)} athletes.")
+    return all_rows
+
+
+def write_csv(rows: list[dict], path: str) -> None:
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=CSV_FIELDNAMES)
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
 
 
 def main() -> int:
@@ -755,115 +922,22 @@ def main() -> int:
     ap.add_argument("--max-athletes", type=int, default=0, help="Debug: limit number of athletes (0 = no limit).")
     args = ap.parse_args()
 
-    client = TrackieClient(
+    all_rows = run_scrape(
+        university_url=args.university_url,
+        years_back=args.years_back,
+        include_past_athletes=args.include_past_athletes,
+        university_id=args.university_id,
         delay_seconds=args.delay_seconds,
+        max_workers=args.max_workers,
         timeout_seconds=args.timeout_seconds,
         retries=args.retries,
+        max_athletes=args.max_athletes,
     )
 
-    uni_html = client.get_html(args.university_url)
-    athlete_index = parse_university_athlete_index(uni_html, args.university_url)
-
-    uni_id = int(args.university_id) if int(args.university_id) > 0 else (_infer_university_id(args.university_url) or 0)
-    rankings_entries_by_athlete: dict[str, list[dict]] = {}
-
-    # Add historical athletes from rankings pages (covers past athletes not present in current roster).
-    if args.include_past_athletes:
-        if not uni_id:
-            print("[warn] Could not infer university id; skipping past athlete discovery.")
-        else:
-            for end_year in _season_end_years(int(args.years_back)):
-                rankings_url = f"https://www.trackie.com/usports/tnf/rankings/universities/{uni_id}/{end_year}/"
-                try:
-                    rhtml = client.get_html(rankings_url)
-                    for ent in parse_rankings_entries(rhtml, rankings_url):
-                        rankings_entries_by_athlete.setdefault(ent["athlete_url"], []).append(ent)
-                    r_index = parse_rankings_athlete_index(rhtml, rankings_url)
-                    # Merge (keep roster sex if present, otherwise use inferred)
-                    for url, meta in r_index.items():
-                        if url not in athlete_index:
-                            athlete_index[url] = meta
-                        else:
-                            if not athlete_index[url].get("sex") and meta.get("sex"):
-                                athlete_index[url]["sex"] = meta["sex"]
-                            if not athlete_index[url].get("name") and meta.get("name"):
-                                athlete_index[url]["name"] = meta["name"]
-                except Exception as e:
-                    print(f"[warn] Failed rankings discovery for {rankings_url}: {e}")
-
-    athlete_urls = sorted(athlete_index.keys())
-    if args.max_athletes and args.max_athletes > 0:
-        athlete_urls = athlete_urls[: args.max_athletes]
-
-    if not athlete_urls:
-        raise RuntimeError("No athlete URLs found on the university page. Trackie page structure may have changed.")
-
-    all_rows: list[dict] = []
-
-    # Use a pool, but keep global rate limiting so we don't hammer Trackie.
-    with ThreadPoolExecutor(max_workers=max(1, int(args.max_workers))) as ex:
-        futures = {
-            ex.submit(
-                scrape_one_athlete,
-                client,
-                url,
-                int(args.years_back),
-                athlete_index.get(url, {}).get("sex") or None,
-            ): url
-            for url in athlete_urls
-        }
-        pbar = tqdm(total=len(futures), desc="Athletes", unit="athlete") if tqdm is not None else None
-        try:
-            for fut in as_completed(futures):
-                url = futures[fut]
-                try:
-                    rows = fut.result()
-                    if not rows:
-                        # Fallback: if the athlete profile page is empty/missing performance tables,
-                        # compute PBs from rankings entries (season-best) across the requested window.
-                        fallback_entries = rankings_entries_by_athlete.get(url, [])
-                        if fallback_entries:
-                            meta = athlete_index.get(url, {})
-                            name = meta.get("name") or url
-                            sex = meta.get("sex") or ""
-                            rows = compute_pbs_from_rankings_entries(url, name, sex, fallback_entries)
-                    all_rows.extend(rows)
-                except Exception as e:
-                    print(f"[warn] Failed athlete {url}: {e}")
-                if pbar is not None:
-                    pbar.update(1)
-        finally:
-            if pbar is not None:
-                pbar.close()
-
-    fieldnames = [
-        "university",
-        "athlete_name",
-        "sex",
-        "event",
-        "pb_raw",
-        "pb_value",
-        "pb_unit",
-        "better_is",
-        "pb_date",
-        "pb_date_raw",
-        "pb_season",
-        "pb_meet",
-        "pb_meet_url",
-        "athlete_url",
-    ]
-
-    with open(args.out, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames)
-        w.writeheader()
-        for r in all_rows:
-            w.writerow(r)
-
-    print(f"Wrote {len(all_rows)} PB rows to {args.out} (from {len(athlete_urls)} athletes).")
+    write_csv(all_rows, args.out)
+    print(f"Wrote {len(all_rows)} PB rows to {args.out}.")
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-
